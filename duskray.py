@@ -200,13 +200,17 @@ def set_startup(enabled):
 # Apply current state
 # ---------------------------------------------------------------------------
 
+NEUTRAL_BRIGHTNESS = 100  # brightness restored when DuskRay is disabled
+
+
 def apply_all():
     with config_lock:
         cfg = config.copy()
-    apply_brightness(cfg["brightness"])
     if cfg["enabled"]:
+        apply_brightness(cfg["brightness"])
         apply_warmth(cfg["warmth_k"])
     else:
+        apply_brightness(NEUTRAL_BRIGHTNESS)
         reset_warmth()
 
 # ---------------------------------------------------------------------------
