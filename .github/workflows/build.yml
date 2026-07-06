@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. v1.0.0)"
+        description: "Release version"
         required: true
         type: string
 
@@ -42,7 +42,7 @@ jobs:
       - name: Build DuskRay.exe
         shell: pwsh
         run: |
-          pyinstaller --onefile --noconsole --clean --strip `
+          pyinstaller --onefile --noconsole --clean `
             --name "DuskRay" `
             --icon=duskray.ico `
             --version-file=version_info.txt `
