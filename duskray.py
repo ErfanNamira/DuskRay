@@ -56,7 +56,7 @@ except ImportError:  # pragma: no cover
 
 # ── Constants ───────────────────────────────────────────────────────────────
 APP_NAME: str = "DuskRay"
-APP_VERSION: str = "1.2.0"
+APP_VERSION: str = "1.2.1"
 CONFIG_DIR: Path = Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
 CONFIG_PATH: Path = CONFIG_DIR / "config.json"
 LOG_PATH: Path = CONFIG_DIR / "duskray.log"
@@ -448,6 +448,14 @@ class DimOverlay:
             return
         alpha_byte = int(alpha_pct * 255 / 100)
         _user32.SetLayeredWindowAttributes(self._hwnd, 0, alpha_byte, LWA_ALPHA)
+        # Only keep the overlay on-screen (and thus in the topmost z-order
+        # band) while it's actually dimming something. At 0% it's shown as
+        # invisible-but-topmost, which sits above the taskbar and prevents
+        # it from popping up on hover.
+        if alpha_pct > 0:
+            _user32.ShowWindow(self._hwnd, SW_SHOWNOACTIVATE)
+        else:
+            _user32.ShowWindow(self._hwnd, SW_HIDE)
 
     @property
     def alpha(self) -> int:
@@ -508,7 +516,12 @@ class DimOverlay:
 
             self._hwnd = hwnd
             _user32.SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA)
-            _user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+            # Keep the window hidden until it's actually needed (alpha > 0).
+            # Leaving a full-screen WS_EX_TOPMOST window shown at all times —
+            # even fully transparent / click-through — parks it in the
+            # topmost z-order band above the taskbar, which blocks the
+            # taskbar's auto-hide/hover-to-show behaviour.
+            _user32.ShowWindow(hwnd, SW_HIDE)
 
             log.info("Overlay window created (%dx%d @ %d,%d)", w, h, x, y)
             self._ready.set()
@@ -539,10 +552,10 @@ class DimOverlay:
             y = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
             w = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
             h = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-            _user32.SetWindowPos(
-                hwnd, HWND_TOPMOST, x, y, w, h,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            )
+            flags = SWP_NOACTIVATE
+            if self._alpha_pct > 0:
+                flags |= SWP_SHOWWINDOW
+            _user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, flags)
             log.debug("Overlay resized after display change (%dx%d)", w, h)
             return 0
 
