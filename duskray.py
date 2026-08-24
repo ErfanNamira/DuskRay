@@ -56,7 +56,7 @@ except ImportError:  # pragma: no cover
 
 # ── Constants ───────────────────────────────────────────────────────────────
 APP_NAME: str = "DuskRay"
-APP_VERSION: str = "1.2.1"
+APP_VERSION: str = "1.2.2"
 CONFIG_DIR: Path = Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
 CONFIG_PATH: Path = CONFIG_DIR / "config.json"
 LOG_PATH: Path = CONFIG_DIR / "duskray.log"
@@ -499,6 +499,14 @@ class DimOverlay:
             y = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
             w = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
             h = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+            # Shave 1px off the bottom edge. Windows treats any TOPMOST window
+            # whose bounds exactly match a monitor's bounds as a "fullscreen
+            # app" and suppresses the auto-hide taskbar's hover-to-reveal for
+            # as long as that window exists — even though this one is
+            # invisible/click-through. A 1px gap is visually undetectable but
+            # stops explorer.exe from classifying it as fullscreen, so hovering
+            # the hidden taskbar keeps working while the overlay is active.
+            h -= 1
 
             ex_style = (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW
                         | WS_EX_TOPMOST | WS_EX_NOACTIVATE)
@@ -551,7 +559,7 @@ class DimOverlay:
             x = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
             y = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
             w = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-            h = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+            h = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1  # see _run()
             flags = SWP_NOACTIVATE
             if self._alpha_pct > 0:
                 flags |= SWP_SHOWWINDOW
