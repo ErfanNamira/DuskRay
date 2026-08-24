@@ -56,7 +56,7 @@ except ImportError:  # pragma: no cover
 
 # ── Constants ───────────────────────────────────────────────────────────────
 APP_NAME: str = "DuskRay"
-APP_VERSION: str = "1.2.2"
+APP_VERSION: str = "1.2.1"
 CONFIG_DIR: Path = Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
 CONFIG_PATH: Path = CONFIG_DIR / "config.json"
 LOG_PATH: Path = CONFIG_DIR / "duskray.log"
@@ -143,21 +143,9 @@ WM_DESTROY          = 0x0002
 WM_QUIT             = 0x0012
 WM_DISPLAYCHANGE    = 0x007E
 WM_NCHITTEST        = 0x0084
-WM_HOTKEY           = 0x0312
 WM_USER_CLOSE       = 0x0400 + 1
 
 HTTRANSPARENT       = -1
-
-# Emergency escape hatch: force-hides the overlay no matter what state it's
-# in. Registered as a global hotkey so a stuck/black overlay (e.g. after a
-# GPU driver crash makes a single brightness call fail) never requires
-# killing the whole app to get your screen back.
-MOD_ALT             = 0x0001
-MOD_CONTROL         = 0x0002
-MOD_SHIFT           = 0x0004
-MOD_NOREPEAT        = 0x4000
-VK_F12              = 0x7B
-EMERGENCY_HOTKEY_ID = 0xD05C
 
 SM_XVIRTUALSCREEN   = 76
 SM_YVIRTUALSCREEN   = 77
@@ -246,12 +234,6 @@ _user32.SetWindowPos.argtypes  = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int
 
 _user32.PostQuitMessage.restype = None
 _user32.PostQuitMessage.argtypes = [ctypes.c_int]
-
-_user32.RegisterHotKey.restype   = ctypes.c_int
-_user32.RegisterHotKey.argtypes  = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
-
-_user32.UnregisterHotKey.restype  = ctypes.c_int
-_user32.UnregisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int]
 
 _kernel32.GetModuleHandleW.restype  = ctypes.c_void_p
 _kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
@@ -490,18 +472,6 @@ class DimOverlay:
                 self._thread.join(timeout=2.0)
             self._hwnd = 0
 
-    def force_clear(self) -> None:
-        """Unconditionally hide the overlay and reset it to fully
-        transparent, regardless of any other internal state. This is the
-        emergency escape hatch bound to a global hotkey — a stuck or
-        wrongly-opaque overlay (e.g. after a hardware brightness call fails
-        mid-way through a GPU driver crash/recovery) should never require
-        killing the whole app to get the screen back."""
-        self._alpha_pct = 0
-        if self._hwnd:
-            _user32.SetLayeredWindowAttributes(self._hwnd, 0, 0, LWA_ALPHA)
-            _user32.ShowWindow(self._hwnd, SW_HIDE)
-
     # ── internal ────────────────────────────────────────────────────────────
     def _run(self) -> None:
         try:
@@ -554,18 +524,6 @@ class DimOverlay:
             _user32.ShowWindow(hwnd, SW_HIDE)
 
             log.info("Overlay window created (%dx%d @ %d,%d)", w, h, x, y)
-
-            if not _user32.RegisterHotKey(
-                hwnd, EMERGENCY_HOTKEY_ID,
-                MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_F12,
-            ):
-                log.warning(
-                    "Could not register emergency-clear hotkey "
-                    "(Ctrl+Alt+Shift+F12), err=%d", _kernel32.GetLastError(),
-                )
-            else:
-                log.info("Emergency-clear hotkey active: Ctrl+Alt+Shift+F12")
-
             self._ready.set()
 
             # Message pump
@@ -575,7 +533,6 @@ class DimOverlay:
                 _user32.DispatchMessageW(ctypes.byref(msg))
 
             # Pump exited — destroy window if still alive
-            _user32.UnregisterHotKey(hwnd, EMERGENCY_HOTKEY_ID)
             if self._hwnd:
                 _user32.DestroyWindow(self._hwnd)
                 self._hwnd = 0
@@ -605,11 +562,6 @@ class DimOverlay:
         if msg == WM_NCHITTEST:
             return HTTRANSPARENT  # click-through
 
-        if msg == WM_HOTKEY and wparam == EMERGENCY_HOTKEY_ID:
-            log.warning("Emergency-clear hotkey pressed — forcing overlay hidden.")
-            self.force_clear()
-            return 0
-
         if msg == WM_USER_CLOSE:
             _user32.DestroyWindow(hwnd)
             return 0
@@ -630,43 +582,18 @@ class BrightnessController:
       * < 0 : set hardware to 0 %, overlay alpha = |virtual| %
     """
 
-    __slots__ = (
-        "_overlay", "_hw_available", "_current_virtual",
-        "_hw_degraded", "_watchdog_stop", "_watchdog_thread",
-    )
+    __slots__ = ("_overlay", "_hw_available", "_current_virtual")
 
     def __init__(self) -> None:
         self._overlay = DimOverlay()
         self._overlay.start()
         self._hw_available = self._detect_hardware()
         self._current_virtual: int = NEUTRAL_BRIGHTNESS
-        self._hw_degraded = False
         log.info(
             "Brightness controller ready — hardware control: %s, overlay: %s",
             "available" if self._hw_available else "unavailable",
             "available" if self._overlay.available else "unavailable",
         )
-
-        self._watchdog_stop = threading.Event()
-        self._watchdog_thread = threading.Thread(
-            target=self._watchdog_loop, daemon=True, name="DuskRay-HWWatchdog",
-        )
-        self._watchdog_thread.start()
-
-    def _watchdog_loop(self) -> None:
-        """Detects when previously-failing brightness hardware starts
-        responding again (e.g. once a GPU driver finishes recovering from a
-        crash/TDR) and re-applies the current setting automatically, so any
-        stand-in overlay state gets resynced without needing the user to
-        touch a menu — or restart the app — first."""
-        while not self._watchdog_stop.wait(5.0):
-            if self._hw_degraded and self._hw_available:
-                try:
-                    sbc.get_brightness()  # type: ignore[union-attr]
-                except Exception:
-                    continue
-                log.info("Hardware brightness responded again — resyncing display state.")
-                self.apply(self._current_virtual)
 
     def _detect_hardware(self) -> bool:
         if not _SBC_AVAILABLE:
@@ -688,22 +615,9 @@ class BrightnessController:
             overlay_pct = max(0, -virtual)
             try:
                 sbc.set_brightness(hw_pct)  # type: ignore[union-attr]
-                self._hw_degraded = False
             except Exception as exc:
-                # IMPORTANT: a transient hardware/driver failure (e.g. a GPU
-                # driver crash or a DDC/CI timeout) must NEVER be
-                # "compensated for" by painting a near-opaque full-screen
-                # overlay — that trades a briefly-wrong brightness for a
-                # potentially stuck, unusable black screen. Fail safe:
-                # leave whatever the overlay is already showing (normally
-                # 0%) alone, and let the watchdog resync once the hardware
-                # responds again.
-                log.warning(
-                    "Hardware brightness call failed (%s); leaving overlay "
-                    "as-is and flagging hardware as degraded.", exc,
-                )
-                self._hw_degraded = True
-                overlay_pct = self._overlay.alpha
+                log.warning("Hardware brightness failed (%s); using overlay.", exc)
+                overlay_pct = max(0, 100 - virtual)
         else:
             # No hardware control — use overlay for the full range
             overlay_pct = max(0, 100 - virtual)
@@ -725,9 +639,6 @@ class BrightnessController:
             return NEUTRAL_BRIGHTNESS
 
     def shutdown(self) -> None:
-        self._watchdog_stop.set()
-        if self._watchdog_thread.is_alive():
-            self._watchdog_thread.join(timeout=1.0)
         self._overlay.set_alpha(0)
         self._overlay.stop()
         if self._hw_available:
