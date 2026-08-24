@@ -56,7 +56,7 @@ except ImportError:  # pragma: no cover
 
 # ── Constants ───────────────────────────────────────────────────────────────
 APP_NAME: str = "DuskRay"
-APP_VERSION: str = "1.2.1"
+APP_VERSION: str = "1.2.2"
 CONFIG_DIR: Path = Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
 CONFIG_PATH: Path = CONFIG_DIR / "config.json"
 LOG_PATH: Path = CONFIG_DIR / "duskray.log"
