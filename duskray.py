@@ -56,7 +56,7 @@ except ImportError:  # pragma: no cover
 
 # ── Constants ───────────────────────────────────────────────────────────────
 APP_NAME: str = "DuskRay"
-APP_VERSION: str = "1.2.2"
+APP_VERSION: str = "1.2.1"
 CONFIG_DIR: Path = Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
 CONFIG_PATH: Path = CONFIG_DIR / "config.json"
 LOG_PATH: Path = CONFIG_DIR / "duskray.log"
@@ -76,6 +76,12 @@ TRANSITION_FPS: int = 30
 WIN_RUN_KEY: str = r"Software\Microsoft\Windows\CurrentVersion\Run"
 MUTEX_NAME: str = f"Global\\{APP_NAME}-Singleton-v2"
 MAX_OVERLAY_ALPHA_PCT: int = 95  # never fully hide the tray icon
+OVERLAY_EDGE_INSET_PX: int = 2   # keep a sliver of every screen edge uncovered
+                                 # by the overlay so a hidden/auto-hide taskbar
+                                 # (on any edge, any monitor) can still be
+                                 # revealed by hovering — a TOPMOST window that
+                                 # fully covers a monitor edge blocks Explorer's
+                                 # hover-to-reveal logic even when invisible.
 
 # ── Logging ─────────────────────────────────────────────────────────────────
 def _init_logging() -> logging.Logger:
@@ -246,6 +252,15 @@ _kernel32.GetLastError.restype = ctypes.c_uint
 _gdi32.CreateSolidBrush.restype  = ctypes.c_void_p
 _gdi32.CreateSolidBrush.argtypes = [ctypes.c_uint]
 
+_gdi32.CreateRectRgn.restype  = ctypes.c_void_p
+_gdi32.CreateRectRgn.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+
+_user32.SetWindowRgn.restype  = ctypes.c_int
+_user32.SetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+
+_gdi32.DeleteObject.restype  = ctypes.c_int
+_gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+
 
 # ── Configuration ───────────────────────────────────────────────────────────
 def _clamp(v: float, lo: float = 0.0, hi: float = 255.0) -> float:
@@ -411,6 +426,45 @@ def reset_warmth() -> None:
     _apply_gamma_ramp(_ramp_cache.get(NEUTRAL_K))
 
 
+def _apply_overlay_region(hwnd: int, w: int, h: int) -> None:
+    """Best-effort extra safety net: also clip the paintable/hit-test region
+    a little inside the window's (already-inset) bounds. Not load-bearing —
+    see the rect inset in _run()/WM_DISPLAYCHANGE, which is what actually
+    keeps GetWindowRect() from reporting full monitor coverage."""
+    inset = 1
+    rgn = _gdi32.CreateRectRgn(inset, inset, max(inset + 1, w - inset), max(inset + 1, h - inset))
+    if not rgn:
+        log.warning("CreateRectRgn failed for overlay region")
+        return
+    if not _user32.SetWindowRgn(hwnd, rgn, True):
+        log.warning("SetWindowRgn failed for overlay window")
+        # Ownership only transfers to the window on success; clean up ourselves.
+        _gdi32.DeleteObject(rgn)
+
+
+def _overlay_bounds() -> tuple[int, int, int, int]:
+    """Virtual-screen bounds for the overlay, inset by OVERLAY_EDGE_INSET_PX
+    on every side.
+
+    The overlay is WS_EX_TOPMOST. If its window RECT exactly matches a
+    monitor's bounds, Explorer classifies it as a fullscreen app and
+    permanently disables hover-to-reveal for an auto-hide taskbar on that
+    monitor — even though the overlay is invisible/click-through, and even
+    though nothing about its *content* changed (any call that re-asserts the
+    window, e.g. a warmth-only transition frame that also happens to re-run
+    apply_brightness(), re-triggers this). Insetting the actual window rect
+    (not just its paint region) on all four sides means GetWindowRect() never
+    reports full monitor coverage on any edge, regardless of which edge the
+    taskbar is docked to.
+    """
+    inset = OVERLAY_EDGE_INSET_PX
+    x = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN) + inset
+    y = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN) + inset
+    w = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN) - 2 * inset
+    h = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN) - 2 * inset
+    return x, y, max(1, w), max(1, h)
+
+
 # ── Dim overlay (click-through topmost black window) ────────────────────────
 class DimOverlay:
     """A click-through, topmost, layered window that covers the entire virtual
@@ -495,18 +549,7 @@ class DimOverlay:
                 self._ready.set()
                 return
 
-            x = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-            y = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-            w = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-            h = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-            # Shave 1px off the bottom edge. Windows treats any TOPMOST window
-            # whose bounds exactly match a monitor's bounds as a "fullscreen
-            # app" and suppresses the auto-hide taskbar's hover-to-reveal for
-            # as long as that window exists — even though this one is
-            # invisible/click-through. A 1px gap is visually undetectable but
-            # stops explorer.exe from classifying it as fullscreen, so hovering
-            # the hidden taskbar keeps working while the overlay is active.
-            h -= 1
+            x, y, w, h = _overlay_bounds()
 
             ex_style = (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW
                         | WS_EX_TOPMOST | WS_EX_NOACTIVATE)
@@ -523,6 +566,7 @@ class DimOverlay:
                 return
 
             self._hwnd = hwnd
+            _apply_overlay_region(hwnd, w, h)
             _user32.SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA)
             # Keep the window hidden until it's actually needed (alpha > 0).
             # Leaving a full-screen WS_EX_TOPMOST window shown at all times —
@@ -556,14 +600,12 @@ class DimOverlay:
     def _wndproc(self, hwnd: int, msg: int, wparam: int, lparam: int) -> int:
         if msg == WM_DISPLAYCHANGE:
             # Monitor layout changed — resize overlay to cover all displays
-            x = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-            y = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-            w = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-            h = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1  # see _run()
+            x, y, w, h = _overlay_bounds()
             flags = SWP_NOACTIVATE
             if self._alpha_pct > 0:
                 flags |= SWP_SHOWWINDOW
             _user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, flags)
+            _apply_overlay_region(hwnd, w, h)
             log.debug("Overlay resized after display change (%dx%d)", w, h)
             return 0
 
