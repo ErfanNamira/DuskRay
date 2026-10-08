@@ -1,8 +1,12 @@
 # ☀️ DuskRay — Display Brightness & Warmth Control App
 
-A small Windows system tray tool to control screen **brightness** (10%–100%)
-and **warmth** (in Kelvin, 2000K–6500K), with one-click enable/disable and a
-"run at startup" option.
+A small, fast Windows system-tray tool that controls screen **brightness**
+(-30 % to 100 %) and **warmth** (2000 K–6500 K) with smooth transitions, an
+optional circadian schedule, multi-monitor support, and a "run at startup"
+option.
+
+Brightness and warmth are **independent**: you can turn warmth off and keep
+your brightness level, or turn everything off at once.
 
 ## ☄️ How to Install (Easy Way)
 
@@ -30,71 +34,100 @@ and **warmth** (in Kelvin, 2000K–6500K), with one-click enable/disable and a
    pythonw duskray.py
    ```
 
+Command-line options: `--debug` (verbose log + console output), `--reset`
+(restore factory defaults, reset the display, remove the startup entry, then exit),
+`--version`.
+
 ## ✨ Using it
 
-- **Click the tray icon** → instantly toggles warmth on/off. This is the
-  fastest way to disable/re-enable the effect.
+- **Left-click the tray icon** → runs the **bold** menu item. By default that
+  is **Enabled** (everything on/off). Change it under **Icon click** to
+  **Toggle warmth only**.
 - **Right-click the tray icon** for the full menu:
-  - **Brightness** → 10% to 100%, in steps of 10.
-  - **Warmth** → Kelvin values from 6500K (neutral) down to 2000K (very
-    warm/orange). Lower K = warmer.
-  - **Enabled** → same toggle as clicking the icon, shown as a checkbox.
-  - **Run at startup** → adds/removes a registry entry so DuskRay launches
-    automatically when you log in to Windows.
-  - **Exit** → resets the display to normal color and closes the app.
+  - **Brightness** → -30 % to 100 %. Values below 0 % add a click-through
+    dimming overlay on top of the hardware minimum.
+  - **Warmth** → 6500 K (neutral) down to 2000 K (very warm). Lower K = warmer.
+    Picking a value turns warmth on, and switches Circadian mode off so your
+    choice sticks.
+  - **Enabled** → master switch: off restores 100 % brightness and neutral colour.
+  - **Warmth enabled** → turns the colour shift off/on **without changing
+    brightness**.
+  - **Smooth transitions** → animate changes instead of snapping.
+  - **Circadian mode** → automatic day/night warmth.
+  - **Circadian settings** → day/night start hour, day/night warmth, and the
+    **Fade duration** (instant, 15, 30 or 60 min) used after each boundary.
+  - **Icon click** → choose what a left-click does.
+  - **Run at startup** → adds/removes a registry entry so DuskRay launches when
+    you log in. At startup, brightness is temporarily raised to at least 10 %
+    so you never boot into a black screen (your saved setting is kept).
+  - **Reset to defaults**, **About**, **Exit** (exit restores the display).
 
-Settings are saved automatically to `%APPDATA%\DuskRay\config.json`.
+The tray icon shows the state: orange sun (active), darker sun (dim overlay),
+blue sun (warmth off, brightness only), grey moon (disabled).
+
+Settings are saved to `%APPDATA%\DuskRay\config.json`; the log (size-capped)
+is `%APPDATA%\DuskRay\duskray.log`. Older config files are upgraded
+automatically, and an invalid value only resets that one setting.
 
 ## 🔧 Building DuskRay.exe
 
-Compiling to a standalone exe gets you a proper icon, a small file size, and
-a correct name in Task Manager / Startup Apps (running the raw `.py` script
-via `pythonw.exe` would otherwise just show "pythonw.exe" there, since that's
-the actual program being launched, not the registry entry name).
-
-1. Generate the icon (only needed once, or after changing the design):
+1. Generate the icon (only needed after changing the artwork — it uses the
+   same drawing code as the tray icon):
    ```
    python generate_icon.py
    ```
-   This creates `duskray.ico` from the same drawing code used by the tray
-   icon, at multiple resolutions.
-
 2. Install the build tools:
    ```
    pip install pyinstaller
    ```
    For a smaller exe, also install [UPX](https://github.com/upx/upx/releases)
    (grab the `-win64` build) and extract it somewhere, e.g. `C:\upx`.
-
 3. Build:
    ```
-   pyinstaller --onefile --noconsole --clean --strip --name "DuskRay" ^
+   pyinstaller --onefile --noconsole --clean --name "DuskRay" ^
        --icon=duskray.ico --version-file=version_info.txt ^
        --upx-dir=C:\upx ^
        --exclude-module tkinter --exclude-module unittest ^
        --exclude-module pdb --exclude-module doctest --exclude-module test ^
        duskray.py
    ```
+4. The result is `dist\DuskRay.exe`. Turn on "Run at startup" from its tray
+   menu — the registry entry will point at `DuskRay.exe`, and Task Manager
+   will show "DuskRay" as the process name and description.
 
-4. The result is `dist\DuskRay.exe`. Run that instead of the `.py` file, and
-   turn on "Run at startup" from its tray menu — the registry entry will
-   point at `DuskRay.exe`, and Task Manager will correctly show "DuskRay" as
-   both the process name and (from the embedded metadata) the description.
+## 🧪 Tests
+
+```
+python -m unittest discover -s tests -v
+```
+
+The suite uses fake devices, so it runs anywhere (including CI) without
+touching your display.
 
 ## 🧪 Notes on Brightness Control
 
-`screen_brightness_control` uses Windows' built-in WMI brightness API, which
-reliably controls **laptop built-in displays**. External monitor support
-depends on the monitor/drivers supporting DDC/CI — some external monitors
-won't respond to software brightness changes; warmth will still work.
+`screen_brightness_control` uses Windows' WMI brightness API (laptop panels)
+and DDC/CI (external monitors that support it). These calls can be slow, so
+DuskRay runs them on a background worker that always applies only the latest
+value — the UI and animations never wait for the monitor. If hardware control
+is unavailable (or keeps failing), DuskRay falls back to the dimming overlay
+automatically; warmth works either way.
 
 ## 🧪 How the Warmth Effect Works
 
-DuskRay adjusts the monitor's gamma ramp — the same underlying Windows
-mechanism used by Night Light/f.lux — using a standard color-temperature
-(Kelvin) approximation to compute the tint, rather than an arbitrary
-percentage. No overlay window is used. Turn off Windows Night Light if you
-use DuskRay, since two gamma-ramp tools will fight each other.
+DuskRay sets a gamma ramp on **every attached monitor** — the same Windows
+mechanism used by Night Light/f.lux — computed from a standard
+colour-temperature (Kelvin) approximation. It re-applies the ramp after
+display changes, sleep/resume and unlock, and periodically while warm, because
+Windows, drivers and games can silently reset it. When warmth is off it leaves
+the gamma alone. Turn off Windows Night Light if you use DuskRay, since two
+gamma tools will fight each other.
+
+**Very warm values have no effect?** By default Windows rejects strong gamma
+ramps. DuskRay detects this, uses the warmest value Windows accepts, and logs
+a hint. To unlock the full range, create the DWORD
+`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM\GdiIcmGammaRange` = `256`
+(admin required), then sign out and back in.
 
 ## 📄 License
 

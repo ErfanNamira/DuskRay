@@ -36,6 +36,9 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
       - name: Generate icon
         run: python generate_icon.py
 
