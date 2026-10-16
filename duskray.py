@@ -10,7 +10,8 @@ overlay dimming (-10/-20/-30 %), safe-startup brightness, and an optional
 
 Warmth and brightness can be controlled independently: "Warmth enabled" turns
 the colour shift off while keeping your brightness level, and the master
-"Enabled" switch turns everything off.
+"Enabled" switch turns everything off. Exiting removes warmth and overlay
+dimming without resetting hardware brightness.
 
 INSTALL (once):
     pip install -r requirements.txt
@@ -57,7 +58,7 @@ IS_WINDOWS: bool = sys.platform == "win32"
 
 # ── Constants ───────────────────────────────────────────────────────────────
 APP_NAME: str = "DuskRay"
-APP_VERSION: str = "1.3.0"
+APP_VERSION: str = "1.3.1"
 
 CONFIG_DIR: Path = Path(
     os.environ.get("DUSKRAY_CONFIG_DIR")
@@ -79,7 +80,7 @@ CLICK_ACTIONS: tuple = (CLICK_TOGGLE_ALL, CLICK_TOGGLE_WARMTH)
 NEUTRAL_K: int = 6500             # "no warmth" reference (daylight)
 MIN_K: int = 2000
 MAX_K: int = NEUTRAL_K
-NEUTRAL_BRIGHTNESS: int = 100     # restored when DuskRay is disabled / exits
+NEUTRAL_BRIGHTNESS: int = 100     # used when disabled or explicitly reset; not on exit
 MIN_BRIGHTNESS: int = -30
 MAX_BRIGHTNESS: int = 100
 SAFE_STARTUP_BRIGHTNESS: int = 10
@@ -724,7 +725,7 @@ class HardwareBrightness:
 
     def _detect(self, backend: Any) -> bool:
         """Retry with back-off; when stopping, make one last immediate try so
-        a final restore (e.g. on exit / --reset) still gets through."""
+        an explicitly requested final restore (e.g. --reset) still gets through."""
         for delay in self._detect_delays:
             with self._cond:
                 if delay and not self._stopping:
@@ -1643,7 +1644,7 @@ class DuskRayApp:
                 log.exception("icon stop failed")
 
     def shutdown(self) -> None:
-        """Restore a normal display. Idempotent and safe from any thread."""
+        """Remove software effects, preserving hardware brightness. Idempotent."""
         with self._lock:
             if self._shutdown_done:
                 return
@@ -1666,7 +1667,8 @@ class DuskRayApp:
             except Exception:
                 log.exception("overlay stop failed")
             if out.hardware is not None:
-                out.hardware.stop(final_pct=NEUTRAL_BRIGHTNESS)
+                # Do not request a final hardware-brightness value on exit.
+                out.hardware.stop()
             try:
                 out.gamma.close()
             except Exception:
