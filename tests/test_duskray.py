@@ -633,7 +633,8 @@ class AppTests(unittest.TestCase):
         self.click("Exit")
         self.assertTrue(self.app._icon.stopped)
         self.assertEqual(self.g.calls[-1], 6500)
-        self.assertEqual(self.h.final, 100)
+        # Exit must not request a final hardware-brightness value.
+        self.assertIsNone(self.h.final)
         self.assertTrue(self.o.stopped)
         self.app.shutdown()  # idempotent
 
